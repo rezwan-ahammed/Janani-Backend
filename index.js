@@ -121,5 +121,27 @@ app.delete('/api/v1/registry/delete', async (req, res) => {
     }
 });
 
+// 6. 🪄 MAGIC ROUTE TO FIX CORS
+app.get('/api/v1/fix-cors', async (req, res) => {
+    try {
+        const b2 = await getB2();
+        await b2.updateBucket({
+            bucketId: process.env.B2_BUCKET_ID,
+            bucketType: 'allPrivate',
+            corsRules: [{
+                corsRuleName: 'allowBrowserUploads',
+                allowedOrigins: ['*'],
+                allowedOperations: ['b2_upload_file', 'b2_download_file_by_name'],
+                allowedHeaders: ['*'],
+                exposeHeaders: ['x-bz-file-name', 'x-bz-content-sha1'],
+                maxAgeSeconds: 3600
+            }]
+        });
+        res.send("✅ MAGIC FIX: CORS rules updated successfully! Go back to your app and upload.");
+    } catch (err) {
+        res.send("❌ Error: " + err.message);
+    }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`JCC Backend online on port ${PORT}`));
