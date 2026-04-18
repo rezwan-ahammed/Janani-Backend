@@ -1,0 +1,15 @@
+{
+  "name": "Janani-Backend",
+  "version": "1.0.0",
+  "description": "Backend server to authorize Backblaze B2 uploads",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "backblaze-b2": "^1.7.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2"
+  }
+}
