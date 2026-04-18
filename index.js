@@ -1,12 +1,12 @@
 const B2 = require('backblaze-b2');
 const express = require('express');
+const multer = require('multer');
 const https = require('https');
-const cors = require('cors');
 
 const app = express();
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100 * 1024 * 1024 } }); // 100MB max
 
-// CORS to allow your frontend to talk to this backend
-app.use(cors());
+// CORS
 app.use((req, res, next) => {
     res.header("Access-Control-Allow-Origin", "*");
     res.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
@@ -17,7 +17,6 @@ app.use((req, res, next) => {
 
 app.use(express.json());
 
-// Re-authorize function for safety on free tiers
 const getB2 = async () => {
     const b2 = new B2({
         applicationKeyId: process.env.B2_KEY_ID,
@@ -27,26 +26,41 @@ const getB2 = async () => {
     return b2;
 };
 
-// Health Check (Use this URL to wake up Render)
+// Health check
 app.get('/', (req, res) => {
     res.json({ status: "JCC_BACKEND_ONLINE", time: new Date().toISOString() });
 });
 
-// 1. Get Token for Uploads
-app.get('/api/v1/auth/upload-token', async (req, res) => {
+// ── Route 1: PROXY UPLOAD (multer handles mobile binary correctly) ──────────
+app.post('/api/v1/registry/upload', upload.single('file'), async (req, res) => {
+    if (!req.file) {
+        return res.status(400).json({ error: "NO_FILE_RECEIVED" });
+    }
+
+    const rawName = req.file.originalname || 'upload';
+    const safeName = `pending_${Date.now()}_${rawName.replace(/[^a-zA-Z0-9.\-_]/g, '_')}`;
+
     try {
         const b2 = await getB2();
-        const response = await b2.getUploadUrl({ bucketId: process.env.B2_BUCKET_ID });
-        res.status(200).json({
-            uploadUrl: response.data.uploadUrl,
-            authorizationToken: response.data.authorizationToken
+        const tokenRes = await b2.getUploadUrl({ bucketId: process.env.B2_BUCKET_ID });
+
+        await b2.uploadFile({
+            uploadUrl: tokenRes.data.uploadUrl,
+            uploadAuthToken: tokenRes.data.authorizationToken,
+            fileName: safeName,
+            data: req.file.buffer,           // ✅ multer gives a proper Buffer
+            contentLength: req.file.size,    // ✅ B2 needs exact size
+            mime: req.file.mimetype
         });
+
+        res.status(200).json({ status: "UPLOAD_SUCCESS", fileName: safeName });
     } catch (err) {
-        res.status(500).json({ error: "B2_AUTH_FAILED", details: err.message });
+        console.error('upload error:', err.message);
+        res.status(500).json({ error: "UPLOAD_FAILED", details: err.message });
     }
 });
 
-// 2. List Files (Generates safe proxy URLs)
+// ── Route 2: List files ─────────────────────────────────────────────────────
 app.get('/api/v1/registry/list', async (req, res) => {
     const prefix = req.query.status === 'admin' ? 'pending_' : 'approved_';
     try {
@@ -62,13 +76,15 @@ app.get('/api/v1/registry/list', async (req, res) => {
             fileName: f.fileName,
             src: `${process.env.BACKEND_URL}/api/v1/media/${encodeURIComponent(f.fileName)}`
         }));
+
         res.status(200).json(gallery);
     } catch (err) {
+        console.error('list error:', err.message);
         res.status(500).json({ error: "REGISTRY_FETCH_FAILED", details: err.message });
     }
 });
 
-// 3. Proxy Media Stream (Safely streams private files to the frontend)
+// ── Route 3: Stream/proxy a private file from B2 ───────────────────────────
 app.get('/api/v1/media/:fileName', async (req, res) => {
     const fileName = decodeURIComponent(req.params.fileName);
     try {
@@ -85,15 +101,15 @@ app.get('/api/v1/media/:fileName', async (req, res) => {
             res.setHeader('Content-Type', b2Res.headers['content-type'] || 'application/octet-stream');
             res.setHeader('Cache-Control', 'public, max-age=3600');
             b2Res.pipe(res);
-        }).on('error', (e) => {
-            res.status(500).json({ error: "PROXY_FAILED" });
-        });
+        }).on('error', () => res.status(500).json({ error: "PROXY_FAILED" }));
+
     } catch (err) {
+        console.error('media error:', err.message);
         res.status(500).json({ error: "MEDIA_FETCH_FAILED", details: err.message });
     }
 });
 
-// 4. Approve File
+// ── Route 4: Approve file ───────────────────────────────────────────────────
 app.post('/api/v1/registry/approve', async (req, res) => {
     const { id, name } = req.body;
     if (!id || !name) return res.status(400).json({ error: "MISSING_PARAMS" });
@@ -102,13 +118,14 @@ app.post('/api/v1/registry/approve', async (req, res) => {
         const b2 = await getB2();
         await b2.copyFile({ sourceFileId: id, fileName: approvedName });
         await b2.deleteFileVersion({ fileId: id, fileName: name });
-        res.status(200).json({ status: "APPROVED", newName: approvedName });
+        res.status(200).json({ status: "APPROVED" });
     } catch (err) {
+        console.error('approve error:', err.message);
         res.status(500).json({ error: "APPROVAL_FAILED", details: err.message });
     }
 });
 
-// 5. Delete File
+// ── Route 5: Delete file ────────────────────────────────────────────────────
 app.delete('/api/v1/registry/delete', async (req, res) => {
     const { id, name } = req.body;
     if (!id || !name) return res.status(400).json({ error: "MISSING_PARAMS" });
@@ -117,29 +134,8 @@ app.delete('/api/v1/registry/delete', async (req, res) => {
         await b2.deleteFileVersion({ fileId: id, fileName: name });
         res.status(200).json({ status: "DELETED" });
     } catch (err) {
+        console.error('delete error:', err.message);
         res.status(500).json({ error: "DELETE_FAILED", details: err.message });
-    }
-});
-
-// 6. 🪄 MAGIC ROUTE TO FIX CORS
-app.get('/api/v1/fix-cors', async (req, res) => {
-    try {
-        const b2 = await getB2();
-        await b2.updateBucket({
-            bucketId: process.env.B2_BUCKET_ID,
-            bucketType: 'allPrivate',
-            corsRules: [{
-                corsRuleName: 'allowBrowserUploads',
-                allowedOrigins: ['*'],
-                allowedOperations: ['b2_upload_file', 'b2_download_file_by_name'],
-                allowedHeaders: ['*'],
-                exposeHeaders: ['x-bz-file-name', 'x-bz-content-sha1'],
-                maxAgeSeconds: 3600
-            }]
-        });
-        res.send("✅ MAGIC FIX: CORS rules updated successfully! Go back to your app and upload.");
-    } catch (err) {
-        res.send("❌ Error: " + err.message);
     }
 });
 
