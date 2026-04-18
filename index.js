@@ -7,13 +7,22 @@ const admin = require('firebase-admin');
 
 const app = express();
 
-// ১. Firebase Firestore Setup (Project ID: general-57884)
-if (!admin.apps.length) {
+// ১. Firebase Firestore Setup (জননী কোচিং সেন্টার)
+const serviceAccount = process.env.FIREBASE_SERVICE_ACCOUNT 
+    ? JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT) 
+    : null;
+
+if (!admin.apps.length && serviceAccount) {
     admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount),
         projectId: "general-57884",
         databaseURL: "https://general-57884-default-rtdb.firebaseio.com"
     });
+} else if (!admin.apps.length) {
+    // ফলব্যাক যদি এনভায়রনমেন্ট ভেরিয়েবল না থাকে
+    admin.initializeApp({ projectId: "general-57884" });
 }
+
 const db = admin.firestore();
 
 const upload = multer({ 
@@ -33,9 +42,9 @@ const getB2 = async () => {
     return b2;
 };
 
-// স্বাস্থ্য পরীক্ষা
+// হেলথ চেক
 app.get('/', (req, res) => {
-    res.json({ status: "JANANI_BACKEND_ONLINE", project: "general-57884" });
+    res.json({ status: "JANANI_BACKEND_ONLINE", brand: "Janani / জননী" });
 });
 
 // আপলোড রুট (নামসহ Firestore-এ তথ্য জমা হবে)
@@ -69,11 +78,12 @@ app.post('/api/v1/registry/upload', upload.single('file'), async (req, res) => {
 
         res.status(200).json({ status: "SUCCESS" });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        console.error("Upload Logic Error:", err.message);
+        res.status(500).json({ error: "Firestore or B2 Error: " + err.message });
     }
 });
 
-// গ্যালারি লিস্ট (Firestore থেকে নামসহ ডেটা আনা)
+// গ্যালারি লিস্ট
 app.get('/api/v1/registry/list', async (req, res) => {
     const status = req.query.status === 'admin' ? 'pending' : 'approved';
     try {
@@ -97,7 +107,7 @@ app.get('/api/v1/registry/list', async (req, res) => {
     }
 });
 
-// অনুমোদন (newFileName ফিক্স সহ)
+// অনুমোদন (Fixed for Janani Portal)
 app.post('/api/v1/registry/approve', async (req, res) => {
     const { id, name } = req.body;
     const approvedName = name.replace('pending_', 'approved_');
@@ -111,20 +121,6 @@ app.post('/api/v1/registry/approve', async (req, res) => {
             await doc.ref.update({ status: 'approved', fileName: approvedName });
         }
         res.status(200).json({ status: "APPROVED" });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-// ডিলিট রুট
-app.delete('/api/v1/registry/delete', async (req, res) => {
-    const { id, name } = req.body;
-    try {
-        const b2 = await getB2();
-        await b2.deleteFileVersion({ fileId: id, fileName: name });
-        const docs = await db.collection('janani_media').where('fileName', '==', name).get();
-        for (const doc of docs.docs) { await doc.ref.delete(); }
-        res.status(200).json({ status: "DELETED" });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
