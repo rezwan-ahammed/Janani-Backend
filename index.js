@@ -7,7 +7,7 @@ const admin = require('firebase-admin');
 
 const app = express();
 
-// Firebase Admin SDK Configuration
+// ১. Firebase Firestore Setup (Project ID: general-57884)
 try {
     const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
     if (!admin.apps.length) {
@@ -35,10 +35,13 @@ const getB2 = async () => {
     return b2;
 };
 
-// ১. Janani Proxy Upload (Firestore-এ নাম সেভ করবে)
+// স্বাস্থ্য পরীক্ষা
+app.get('/', (req, res) => res.json({ status: "JANANI_LIVE", brand: "Janani / জননী" }));
+
+// 🚀 আপলোড রুট
 app.post('/api/v1/registry/upload', upload.single('file'), async (req, res) => {
     const { studentName } = req.body;
-    if (!req.file || !studentName) return res.status(400).json({ error: "ফাইল ও নাম প্রয়োজন" });
+    if (!req.file || !studentName) return res.status(400).json({ error: "Missing data" });
 
     const safeName = `pending_${Date.now()}_${req.file.originalname.replace(/[^a-zA-Z0-9.]/g, '_')}`;
 
@@ -55,6 +58,7 @@ app.post('/api/v1/registry/upload', upload.single('file'), async (req, res) => {
             mime: req.file.mimetype
         });
 
+        // Firestore-এ তথ্য সংরক্ষণ
         await db.collection('janani_media').add({
             fileName: safeName,
             studentName: studentName,
@@ -63,29 +67,31 @@ app.post('/api/v1/registry/upload', upload.single('file'), async (req, res) => {
         });
 
         res.status(200).json({ status: "SUCCESS" });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ২. লিস্ট রুট (Firestore থেকে নামসহ আনা)
+// 📁 লিস্ট রুট (ফিক্সড: orderBy সরিয়ে দেওয়া হয়েছে ইনডেক্স এরর এড়াতে)
 app.get('/api/v1/registry/list', async (req, res) => {
+    // status: 'public' আসলে আমরা 'approved' ডাটা দেখাবো
     const status = req.query.status === 'admin' ? 'pending' : 'approved';
     try {
         const snapshot = await db.collection('janani_media')
             .where('status', '==', status)
-            .orderBy('timestamp', 'desc').get();
+            .get();
 
-        const gallery = snapshot.docs.map(doc => ({
-            id: doc.id,
-            ...doc.data(),
-            src: `${process.env.BACKEND_URL}/api/v1/media/${encodeURIComponent(doc.data().fileName)}`
-        }));
+        const gallery = snapshot.docs.map(doc => {
+            const data = doc.data();
+            return {
+                id: doc.id,
+                ...data,
+                src: `${process.env.BACKEND_URL}/api/v1/media/${encodeURIComponent(data.fileName)}`
+            };
+        });
         res.status(200).json(gallery);
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ৩. অনুমোদন (newFileName ফিক্স)
+// ✅ অনুমোদন রুট
 app.post('/api/v1/registry/approve', async (req, res) => {
     const { id, name } = req.body;
     const approvedName = name.replace('pending_', 'approved_');
@@ -101,7 +107,7 @@ app.post('/api/v1/registry/approve', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ৪. মিডিয়া স্ট্রিম
+// 📺 মিডিয়া স্ট্রিম
 app.get('/api/v1/media/:fileName', async (req, res) => {
     const fileName = decodeURIComponent(req.params.fileName);
     try {
@@ -118,4 +124,4 @@ app.get('/api/v1/media/:fileName', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`Janani Backend Live on ${PORT}`));
+app.listen(PORT, () => console.log(`Janani Backend Live`));
