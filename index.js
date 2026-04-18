@@ -1,45 +1,70 @@
-require('dotenv').config(); // Allows local testing if you use a .env file later
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const B2 = require('backblaze-b2');
 
 const app = express();
-
-// Enable CORS so your React HTML file is allowed to talk to this server
 app.use(cors());
 
-// Initialize the Backblaze client using environment variables
 const b2 = new B2({
   applicationKeyId: process.env.B2_KEY_ID, 
   applicationKey: process.env.B2_APP_KEY
 });
 
-// The endpoint your React frontend will call
+// 1. Upload Route (unchanged)
 app.get('/api/get-b2-upload-url', async (req, res) => {
   try {
-    // 1. Authorize the connection with Backblaze
     await b2.authorize(); 
-    
-    // 2. Request an upload URL for your specific bucket
-    const response = await b2.getUploadUrl({
-      bucketId: process.env.B2_BUCKET_ID 
-    });
-    
-    // 3. Send the generated URL and authorization token back to the frontend
+    const response = await b2.getUploadUrl({ bucketId: process.env.B2_BUCKET_ID });
     res.json({
       uploadUrl: response.data.uploadUrl,
       authorizationToken: response.data.authorizationToken
     });
-
   } catch (error) {
-    console.error("Backblaze Error:", error);
-    res.status(500).json({ error: "Failed to get secure upload URL from Backblaze" });
+    res.status(500).json({ error: "Failed to get B2 URL" });
   }
 });
 
-// Use the port Render assigns, or default to 3000 for local testing
-const PORT = process.env.PORT || 3000;
+// 2. NEW Gallery Route (Lists files and generates secure image URLs)
+app.get('/api/gallery', async (req, res) => {
+  try {
+    await b2.authorize();
+    
+    // Get the list of files in the bucket
+    const listResponse = await b2.listFileNames({
+      bucketId: process.env.B2_BUCKET_ID,
+      maxFileCount: 100 // Fetch up to 100 images
+    });
 
-app.listen(PORT, () => {
-  console.log(`Backend server is successfully running on port ${PORT}`);
+    // Generate a secure 1-hour access token for downloading
+    const authResponse = await b2.getDownloadAuthorization({
+      bucketId: process.env.B2_BUCKET_ID,
+      fileNamePrefix: '', 
+      validDurationInSeconds: 3600 
+    });
+
+    const bucketName = process.env.B2_BUCKET_NAME;
+    const downloadToken = authResponse.data.authorizationToken;
+
+    // Map the files into an array of secure URLs
+    const files = listResponse.data.files.map(file => {
+      // Backblaze secure download URL format
+      const secureUrl = `${b2.downloadUrl}/file/${bucketName}/${encodeURIComponent(file.fileName)}?Authorization=${downloadToken}`;
+      return {
+        id: file.fileId,
+        name: file.fileName,
+        url: secureUrl,
+        date: new Date(file.uploadTimestamp).toLocaleDateString()
+      };
+    });
+
+    res.json(files.reverse()); // Reverse to show newest photos first
+
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Failed to load gallery" });
+  }
 });
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
