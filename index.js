@@ -7,8 +7,7 @@ const admin = require('firebase-admin');
 
 const app = express();
 
-// ১. Firebase Firestore Setup (google-services.json থেকে তথ্য নেওয়া হয়েছে)
-// নোট: Render-এ আপনার Service Account JSON-টি এনভায়রনমেন্ট ভেরিয়েবল হিসেবে সেট করা ভালো।
+// ১. Firebase Firestore Setup (Project ID: general-57884)
 if (!admin.apps.length) {
     admin.initializeApp({
         projectId: "general-57884",
@@ -23,13 +22,6 @@ const upload = multer({
 });
 
 app.use(cors());
-app.use((req, res, next) => {
-    res.header("Access-Control-Allow-Origin", "*");
-    res.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
-    if (req.method === 'OPTIONS') return res.sendStatus(200);
-    next();
-});
 app.use(express.json());
 
 const getB2 = async () => {
@@ -41,10 +33,15 @@ const getB2 = async () => {
     return b2;
 };
 
-// 🚀 ৫. প্রক্সি আপলোড + Firestore-এ নাম সংরক্ষণ
+// স্বাস্থ্য পরীক্ষা
+app.get('/', (req, res) => {
+    res.json({ status: "JANANI_BACKEND_ONLINE", project: "general-57884" });
+});
+
+// আপলোড রুট (নামসহ Firestore-এ তথ্য জমা হবে)
 app.post('/api/v1/registry/upload', upload.single('file'), async (req, res) => {
-    const { studentName } = req.body; // ফ্রন্টেন্ড থেকে পাঠানো নাম
-    if (!req.file || !studentName) return res.status(400).json({ error: "ফাইল এবং নাম দুটোই প্রয়োজন" });
+    const { studentName } = req.body;
+    if (!req.file || !studentName) return res.status(400).json({ error: "ফাইল এবং নাম আবশ্যক" });
 
     const rawName = req.file.originalname || 'upload';
     const safeName = `pending_${Date.now()}_${rawName.replace(/[^a-zA-Z0-9.\-_]/g, '_')}`;
@@ -62,7 +59,7 @@ app.post('/api/v1/registry/upload', upload.single('file'), async (req, res) => {
             mime: req.file.mimetype
         });
 
-        // Firestore-এ এন্ট্রি তৈরি করা
+        // Firestore-এ তথ্য সংরক্ষণ
         await db.collection('janani_media').add({
             fileName: safeName,
             studentName: studentName,
@@ -70,14 +67,13 @@ app.post('/api/v1/registry/upload', upload.single('file'), async (req, res) => {
             timestamp: admin.firestore.FieldValue.serverTimestamp()
         });
 
-        res.status(200).json({ status: "UPLOAD_SUCCESS" });
+        res.status(200).json({ status: "SUCCESS" });
     } catch (err) {
-        console.error('Upload Error:', err.message);
-        res.status(500).json({ error: "UPLOAD_FAILED", details: err.message });
+        res.status(500).json({ error: err.message });
     }
 });
 
-// 📁 ৬. গ্যালারি লিস্ট (Firestore থেকে নামসহ ডাটা আনা)
+// গ্যালারি লিস্ট (Firestore থেকে নামসহ ডেটা আনা)
 app.get('/api/v1/registry/list', async (req, res) => {
     const status = req.query.status === 'admin' ? 'pending' : 'approved';
     try {
@@ -95,14 +91,13 @@ app.get('/api/v1/registry/list', async (req, res) => {
                 src: `${process.env.BACKEND_URL}/api/v1/media/${encodeURIComponent(data.fileName)}`
             };
         });
-
         res.status(200).json(gallery);
     } catch (err) {
-        res.status(500).json({ error: "LIST_FAILED", details: err.message });
+        res.status(500).json({ error: err.message });
     }
 });
 
-// ✅ ৮. অনুমোদন (Firestore স্ট্যাটাস আপডেট)
+// অনুমোদন (newFileName ফিক্স সহ)
 app.post('/api/v1/registry/approve', async (req, res) => {
     const { id, name } = req.body;
     const approvedName = name.replace('pending_', 'approved_');
@@ -111,42 +106,31 @@ app.post('/api/v1/registry/approve', async (req, res) => {
         await b2.copyFile({ sourceFileId: id, newFileName: approvedName });
         await b2.deleteFileVersion({ fileId: id, fileName: name });
 
-        // Firestore আপডেট (ID দিয়ে সরাসরি আপডেট)
         const docs = await db.collection('janani_media').where('fileName', '==', name).get();
-        const updatePromises = docs.docs.map(doc => doc.ref.update({ 
-            status: 'approved',
-            fileName: approvedName 
-        }));
-        await Promise.all(updatePromises);
-
+        for (const doc of docs.docs) {
+            await doc.ref.update({ status: 'approved', fileName: approvedName });
+        }
         res.status(200).json({ status: "APPROVED" });
     } catch (err) {
-        res.status(500).json({ error: "APPROVAL_FAILED", details: err.message });
+        res.status(500).json({ error: err.message });
     }
 });
 
-// 🗑️ ৯. ডিলিট (Firestore থেকে মুছে ফেলা)
+// ডিলিট রুট
 app.delete('/api/v1/registry/delete', async (req, res) => {
-    const { name } = req.body;
+    const { id, name } = req.body;
     try {
         const b2 = await getB2();
-        // ফাইলটি খুঁজে বের করা এবং ডিলিট করা
-        const list = await b2.listFileNames({ bucketId: process.env.B2_BUCKET_ID, prefix: name, maxFileCount: 1 });
-        if (list.data.files.length > 0) {
-            await b2.deleteFileVersion({ fileId: list.data.files[0].fileId, fileName: name });
-        }
-
+        await b2.deleteFileVersion({ fileId: id, fileName: name });
         const docs = await db.collection('janani_media').where('fileName', '==', name).get();
-        const deletePromises = docs.docs.map(doc => doc.ref.delete());
-        await Promise.all(deletePromises);
-
+        for (const doc of docs.docs) { await doc.ref.delete(); }
         res.status(200).json({ status: "DELETED" });
     } catch (err) {
-        res.status(500).json({ error: "DELETE_FAILED", details: err.message });
+        res.status(500).json({ error: err.message });
     }
 });
 
-// মিডিয়া প্রক্সি স্ট্রিম (আগের মতোই)
+// মিডিয়া প্রক্সি স্ট্রিম
 app.get('/api/v1/media/:fileName', async (req, res) => {
     const fileName = decodeURIComponent(req.params.fileName);
     try {
@@ -157,10 +141,10 @@ app.get('/api/v1/media/:fileName', async (req, res) => {
         const downloadUrl = `${b2.downloadUrl}/file/${process.env.B2_BUCKET_NAME}/${encodeURIComponent(fileName)}?Authorization=${dlAuth.data.authorizationToken}`;
         https.get(downloadUrl, (b2Res) => {
             res.setHeader('Content-Type', b2Res.headers['content-type'] || 'application/octet-stream');
-            res.pipe(res);
+            b2Res.pipe(res);
         });
-    } catch (err) { res.status(500).send("Proxy error"); }
+    } catch (err) { res.status(500).send("Stream error"); }
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`Backend online on ${PORT}`));
+app.listen(PORT, () => console.log(`Janani Backend online on ${PORT}`));
