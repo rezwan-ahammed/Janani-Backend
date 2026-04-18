@@ -1,70 +1,64 @@
-require('dotenv').config();
+const B2 = require('backblaze-b2');
 const express = require('express');
 const cors = require('cors');
-const B2 = require('backblaze-b2');
 
 const app = express();
 app.use(cors());
+app.use(express.json());
 
 const b2 = new B2({
   applicationKeyId: process.env.B2_KEY_ID, 
   applicationKey: process.env.B2_APP_KEY
 });
 
-// 1. Upload Route (unchanged)
+// Helper: Authorize B2
+const initB2 = async () => { await b2.authorize(); };
+
+// 1. Get Upload URL
 app.get('/api/get-b2-upload-url', async (req, res) => {
   try {
-    await b2.authorize(); 
+    await initB2();
     const response = await b2.getUploadUrl({ bucketId: process.env.B2_BUCKET_ID });
-    res.json({
-      uploadUrl: response.data.uploadUrl,
-      authorizationToken: response.data.authorizationToken
-    });
-  } catch (error) {
-    res.status(500).json({ error: "Failed to get B2 URL" });
-  }
+    res.json(response.data);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// 2. NEW Gallery Route (Lists files and generates secure image URLs)
-app.get('/api/gallery', async (req, res) => {
+// 2. List Files for Gallery/Admin
+app.get('/api/list-files', async (req, res) => {
+  const mode = req.query.mode; // 'approved' or 'pending'
   try {
-    await b2.authorize();
+    await initB2();
+    const list = await b2.listFileNames({
+      bucketId: process.env.B2_BUCKET_ID,
+      maxFileCount: 1000,
+      prefix: mode === 'admin' ? 'pending_' : 'approved_'
+    });
     
-    // Get the list of files in the bucket
-    const listResponse = await b2.listFileNames({
-      bucketId: process.env.B2_BUCKET_ID,
-      maxFileCount: 100 // Fetch up to 100 images
+    const files = list.data.files.map(f => ({
+      id: f.fileId,
+      name: f.fileName,
+      url: `https://f000.backblazeb2.com/file/${process.env.B2_BUCKET_NAME}/${f.fileName}`
+    }));
+    res.json(files);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// 3. Admin: Approve (Rename file)
+app.post('/api/approve-file', async (req, res) => {
+  const { fileId, fileName } = req.body;
+  const newName = fileName.replace('pending_', 'approved_');
+  try {
+    await initB2();
+    // B2 renames by copying then deleting
+    await b2.copyFile({
+      sourceFileId: fileId,
+      destinationFileName: newName,
+      metadataDirective: 'COPY'
     });
-
-    // Generate a secure 1-hour access token for downloading
-    const authResponse = await b2.getDownloadAuthorization({
-      bucketId: process.env.B2_BUCKET_ID,
-      fileNamePrefix: '', 
-      validDurationInSeconds: 3600 
-    });
-
-    const bucketName = process.env.B2_BUCKET_NAME;
-    const downloadToken = authResponse.data.authorizationToken;
-
-    // Map the files into an array of secure URLs
-    const files = listResponse.data.files.map(file => {
-      // Backblaze secure download URL format
-      const secureUrl = `${b2.downloadUrl}/file/${bucketName}/${encodeURIComponent(file.fileName)}?Authorization=${downloadToken}`;
-      return {
-        id: file.fileId,
-        name: file.fileName,
-        url: secureUrl,
-        date: new Date(file.uploadTimestamp).toLocaleDateString()
-      };
-    });
-
-    res.json(files.reverse()); // Reverse to show newest photos first
-
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Failed to load gallery" });
-  }
+    await b2.deleteFileVersion({ fileId: fileId, fileName: fileName });
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
+app.listen(PORT, () => console.log(`JCC Backend Active on ${PORT}`));
